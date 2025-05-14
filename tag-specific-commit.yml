@@ -1,0 +1,53 @@
+name: "Tag Specific Commit"
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Commit SHA to tag"
+        required: true
+      label:
+        description: "Base label for tag (e.g., client-prod)"
+        required: true
+
+concurrency:
+  group: "tagging-workflow"
+  cancel-in-progress: false # Ensures workflows wait instead of canceling
+
+jobs:
+  tag-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git with PR Author
+        run: |
+          git config --global user.name "${{ github.actor }}"
+          git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+      
+      - name: Fetch latest tags
+        run: git fetch --tags
+
+      - name: Determine latest version
+        id: get_version
+        run: |
+          LABEL="${{ github.event.inputs.label }}"
+          LATEST_TAG=$(git tag --list "$LABEL-v*" | sort -V | tail -n 1 || true)
+
+          if [[ -z "$LATEST_TAG" ]]; then
+            NEW_TAG="${LABEL}-v1"
+          else
+            VERSION=$(echo "$LATEST_TAG" | sed -n 's/.*-v\([0-9]\+\)/\1/p')
+            NEW_TAG="${LABEL}-v$((VERSION + 1))"
+          fi
+
+          echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
+          echo "Generated tag: $NEW_TAG"
+
+      - name: Create and push tag
+        run: |
+          git tag -a "$NEW_TAG" -m "Tagging commit ${{ github.event.inputs.commit_sha }}" ${{ github.event.inputs.commit_sha }}
+          git push origin "$NEW_TAG"

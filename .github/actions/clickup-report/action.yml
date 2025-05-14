@@ -1,0 +1,12 @@
+runs:
+  using: "composite"
+  steps:
+    - name: Make script executable and run it
+      shell: bash
+      run: |
+        chmod +x "${{ github.action_path }}/../shared-scripts/report-to-clickup.sh"
+        CLICKUP_TOKEN="${{ inputs.clickup_token }}" \
+        CLICKUP_TASK_ID="${{ inputs.clickup_task_id }}" \
+        TEST_FAILED="${{ inputs.test_failed }}" \
+        ATTACHMENT="${{ inputs.attachment }}" \
+        "${{ github.action_path }}/../shared-scripts/report-to-clickup.sh"

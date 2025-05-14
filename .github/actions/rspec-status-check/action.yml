@@ -1,0 +1,37 @@
+name: RSpec Status Check
+description: Run RSpec tests, set pass/fail boolean, and upload results.
+
+inputs:
+  rspec_args:
+    description: Arguments to pass to RSpec
+    required: false
+    default: ""
+
+outputs:
+  passed:
+    description: Boolean indicating if the tests passed (true or false)
+    value: ${{ steps.set-result.outputs.passed }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run RSpec and capture exit code
+      id: rspec-run
+      shell: bash
+      run: |
+        set -o pipefail
+        bundle exec rspec ${{ inputs.rspec_args }} | tee rspec_output.txt
+        echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+
+    - name: Set result output
+      id: set-result
+      shell: bash
+      run: |
+        echo "passed=$([ '${{ steps.rspec-run.outputs.exit_code }}' = '0' ] && echo true || echo false)" >> $GITHUB_OUTPUT
+
+    - name: Upload RSpec output
+      uses: actions/upload-artifact@v4
+      with:
+        name: rspec-output
+        path: rspec_output.txt
+        if-no-files-found: warn

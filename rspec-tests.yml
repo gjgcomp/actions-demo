@@ -1,0 +1,143 @@
+name: API Tests
+on:
+  workflow_dispatch:  # Allows manual and API-triggered runs
+    inputs:
+      app_mapping:
+        description: 'App Test will run for'
+        required: true
+      clickup_id:
+        description: 'ClickUp Task ID'
+        required: true
+      test_args:
+        description: 'Additional arguments for RSpec'
+        required: false
+        default: ""
+  repository_dispatch:  # Enables triggering from external sources
+    types: [api-tests-trigger]
+
+jobs:
+  run-rspec:
+    name: Run RSpec Tests
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8
+        ports:
+          - 3306:3306
+        env:
+          MYSQL_DATABASE: walktober_2025_test
+          MYSQL_USER: ci-runner
+          MYSQL_PASSWORD: password
+          MYSQL_ROOT_PASSWORD: root
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      RAILS_ENV: test
+      RACK_ENV: test
+      DATABASE_URL: mysql2://ci-runner:password@127.0.0.1:3306/walktober_2025_test
+      TARGET_DATABASE: walktober
+      APPLICATION_CONFIG_FILE: walktober.yml
+      PROJECT: walktober
+      REDIS_ENDPOINT: redis://127.0.0.1:6379
+      REDIS_URL: redis://127.0.0.1:6379
+      MEMCACHED_ENDPOINT: memcached://memcached:11211
+      USE_DEV_DB: true
+
+    steps:
+      - name: Set ClickUp ID
+        id: get_id
+        run: |
+          # Check if clickup_id is available from workflow_dispatch inputs
+          if [ -n "${{ github.event.inputs.clickup_id }}" ]; then
+            echo "clickup_id=${{ github.event.inputs.clickup_id }}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ github.event.client_payload.clickup_id }}" ]; then
+            echo "clickup_id=${{ github.event.client_payload.clickup_id }}" >> $GITHUB_OUTPUT
+          else
+            echo "No clickup_id found"
+            exit 1
+          fi
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: 3.1.4
+          #bundler-cache: true
+      
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: bundle install
+    
+      - name: Set up DB and run migrations
+        run: |
+          # Should a ci specific database.yml be used, or just use default?
+          cp config/database.walktober.yml config/database.yml
+          sed -i 's/prime-db/127.0.0.1/' config/database.yml
+          sed -i 's/username: root/username: ci-runner/' config/database.yml
+          bundle exec rake db:create db:schema:load
+
+      - name: Run RSpec and determine result
+        id: rspec-check
+        uses: hesdevs/actions/.github/actions/rspec-status-check@master
+        with:
+          rspec_args: "${{github.event.inputs.test_args}} --format documentation"
+      
+      - name: Output test result status
+        run: echo "RSpec passed? ${{ steps.rspec-check.outputs.passed }}"
+      
+      - name: Download RSpec Results
+        uses: actions/download-artifact@v4
+        with:
+          name: rspec-output
+
+      - name: Show RSpec Output
+        run: cat rspec_output.txt
+
+      - name: Report results to ClickUp
+        uses: hesdevs/actions/.github/actions/clickup-report@master
+        with:
+          clickup_token: ${{ secrets.CLICKUP_API_TOKEN }}
+          clickup_task_id: ${{ steps.get_id.outputs.clickup_id }}
+          test_failed: ${{ steps.rspec-check.outputs.passed }}
+          attachment: rspec_output.txt
+      
+      - name: Trigger Concourse Rollback (via GitHub Release)
+        if: env.TEST_FAILED == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -X POST "https://api.github.com/repos/${{ github.repository }}/releases" \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d '{"tag_name":"rollback-trigger-'$(date +%s)'","name":"Rollback Trigger"}'
+      
+      - name: Cleanup Release
+        if: env.TEST_FAILED == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_TAG="rollback-trigger-'$(date +%s)'"
+          RELEASE_ID=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" | jq '.id')
+          
+          # Delete the release
+          curl -X DELETE "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID" \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json"

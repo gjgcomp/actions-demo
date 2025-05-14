@@ -1,0 +1,165 @@
+name: Playwright Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_args:
+        description: 'Additional arguments for Playwright (e.g., tests/suite)'
+        required: true
+        default: ""
+      app_env:
+        description: 'Application environment (e.g., dev, staging, prod)'
+        required: true
+        default: ""
+  repository_dispatch:
+    types: [client-tests-trigger]
+
+jobs:
+  test:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set Runner args
+        id: get_args
+        run: |
+          echo "test_args=${{ github.event.inputs.test_args || github.event.client_payload.test_args || '' }}" >> $GITHUB_OUTPUT
+          echo "app_env=${{ github.event.inputs.app_env || github.event.client_payload.app_env }}" >> $GITHUB_OUTPUT
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout Automated Tests
+        uses: actions/checkout@v4
+        with:
+          repository: devs/automated-testing
+          token: ${{ secrets.AUTOMATED_TESTING_PAT }}
+          path: automated-testing
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            automated-testing/node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('automated-testing/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('automated-testing/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Install dependencies in (automated-testing)
+        working-directory: automated-testing
+        run: npm ci
+
+      - name: Install Playwright Browsers
+        working-directory: automated-testing
+        run: npx playwright install --with-deps
+
+      - name: Run Playwright tests
+        id: playwright-run
+        working-directory: automated-testing
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_ARGS: ${{ steps.get_args.outputs.test_args }}
+        run: |
+          set +e # We want to capture the exit code even if the command fails. Github Actions has this enabled by default. Keep it.
+          set -o pipefail # Makes sure that if any command in a pipeline fails, the whole pipeline fails.
+          npx playwright test $PLAYWRIGHT_ARGS
+          exit_code=$? # Capture the exit code of the last command. 0 is success, anything else is failure.
+          echo "Playwright exit code: $exit_code"
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+          
+      - name: Set result output
+        id: set-result
+        run: |
+          echo "Playwright2 exit code: ${{ steps.playwright-run.outputs.exit_code }}"
+          echo "passed=$([ '${{ steps.playwright-run.outputs.exit_code }}' = '0' ] && echo true || echo false)" >> $GITHUB_OUTPUT
+
+      - name: Upload Playwright Report as Artifact
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: automated-testing/playwright-report/
+          retention-days: 7
+
+      - name: Parse JSON for counts
+        id: parse-counts
+        working-directory: automated-testing
+        run: |
+          JSON=playwright-report/test-results.json
+          cat $JSON
+          # count tests by status
+          passed=$(jq '.stats.expected'   $JSON)
+          failed=$(jq '.stats.unexpected' $JSON)
+          skipped=$(jq '.stats.skipped'   $JSON)
+          
+          echo "passed_count=$passed" >> $GITHUB_OUTPUT
+          echo "failed_count=$failed" >> $GITHUB_OUTPUT
+          echo "skipped_count=$skipped" >> $GITHUB_OUTPUT
+
+      - name: Download Playwright Results
+        uses: actions/download-artifact@v4
+        with:
+          name: playwright-report
+      
+      - name: Zip Playwright report
+        run: zip -r playwright-report.zip playwright-report/
+        working-directory: automated-testing
+      
+      - name: Determine Slack Webhook
+        id: get-webhook
+        env:
+          SLACK_WEBHOOK_APP1: ${{ secrets.SLACK_WEBHOOK_APP1 }}
+          SLACK_WEBHOOK_APP2: ${{ secrets.SLACK_WEBHOOK_APP2 }}
+          SLACK_WEBHOOK_DEFAULT: ${{ secrets.SLACK_WEBHOOK_DEFAULT }}
+        run: |
+          # Extract app name from test path like "tests/app1"
+          APP=$(echo "${{ steps.get_args.outputs.test_args }}" | cut -d'/' -f2 | tr '[:lower:]' '[:upper:]')
+
+          # Construct the secret env var name
+          SECRET_VAR_NAME="SLACK_WEBHOOK_${APP}"
+
+          # Use indirect expansion to resolve the correct webhook URL
+          WEBHOOK_URL="${!SECRET_VAR_NAME}"
+
+          # Fallback if undefined
+          if [ -z "$WEBHOOK_URL" ]; then
+            WEBHOOK_URL="${SLACK_WEBHOOK_DEFAULT}"
+            echo "⚠️ No specific webhook found for $APP — using default."
+          fi
+
+          echo "SLACK_WEBHOOK_URL=$WEBHOOK_URL" >> "$GITHUB_ENV"
+      
+      - name: Send Slack summary
+        env:
+          SLACK_WEBHOOK_URL: ${{ env.SLACK_WEBHOOK_URL }}
+        run: |
+          passed=${{ steps.set-result.outputs.passed }}
+          status_color="#DC143C" # Red for failure
+          if [ "$passed" == "true" ]; then
+            status_color="#36a64f" # Green for success
+          fi
+      
+          branch_name="${GITHUB_REF##*/}"
+          app_env="${{ steps.get_args.outputs.app_env }}"
+          test_args="${{ steps.get_args.outputs.test_args }}"
+          passed_count=${{ steps.parse-counts.outputs.passed_count }}
+          failed_count=${{ steps.parse-counts.outputs.failed_count }}
+          skipped_count=${{ steps.parse-counts.outputs.skipped_count }}
+      
+          payload="{\"attachments\":[{\"color\":\"$status_color\",\"text\":\"*Critical Tests: $test_args*\\n• *Results:* $passed_count passed, $failed_count failed, $skipped_count skipped [$branch_name on $app_env]\\n• *Report:* <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Full Report>\"}]}"
+      
+          curl -X POST -H 'Content-type: application/json' --data "$payload" $SLACK_WEBHOOK_URL
