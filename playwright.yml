@@ -3,9 +3,12 @@ name: Playwright Tests
 on:
   workflow_dispatch:
     inputs:
-      test_args:
-        description: 'Additional arguments for Playwright (e.g., tests/suite)'
+      clickup_id:
+        description: 'ClickUp Task ID'
         required: true
+      test_args:
+        description: 'Additional arguments for Playwright (e.g., tests/app)'
+        required: false
         default: ""
       app_env:
         description: 'Application environment (e.g., dev, staging, prod)'
@@ -19,12 +22,22 @@ jobs:
     timeout-minutes: 60
     runs-on: ubuntu-latest
 
-    steps:
+    steps:        
       - name: Set Runner args
         id: get_args
         run: |
           echo "test_args=${{ github.event.inputs.test_args || github.event.client_payload.test_args || '' }}" >> $GITHUB_OUTPUT
           echo "app_env=${{ github.event.inputs.app_env || github.event.client_payload.app_env }}" >> $GITHUB_OUTPUT
+
+      - name: Set ClickUp ID
+        id: get_id
+        run: |
+          CLICKUP_ID="${{ github.event.inputs.clickup_id || github.event.client_payload.clickup_id }}"
+          if [ -z "$CLICKUP_ID" ]; then
+            echo "No clickup_id found"
+            exit 1
+          fi
+          echo "clickup_id=$CLICKUP_ID" >> $GITHUB_OUTPUT
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -32,7 +45,7 @@ jobs:
       - name: Checkout Automated Tests
         uses: actions/checkout@v4
         with:
-          repository: devs/automated-testing
+          repository: gjgcomp/automated-testing
           token: ${{ secrets.AUTOMATED_TESTING_PAT }}
           path: automated-testing
 
@@ -67,34 +80,11 @@ jobs:
         working-directory: automated-testing
         run: npx playwright install --with-deps
 
-      - name: Run Playwright tests
-        id: playwright-run
-        working-directory: automated-testing
-        continue-on-error: true
-        env:
-          PLAYWRIGHT_ARGS: ${{ steps.get_args.outputs.test_args }}
-        run: |
-          set +e # We want to capture the exit code even if the command fails. Github Actions has this enabled by default. Keep it.
-          set -o pipefail # Makes sure that if any command in a pipeline fails, the whole pipeline fails.
-          npx playwright test $PLAYWRIGHT_ARGS
-          exit_code=$? # Capture the exit code of the last command. 0 is success, anything else is failure.
-          echo "Playwright exit code: $exit_code"
-          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
-          
-      - name: Set result output
-        id: set-result
-        run: |
-          echo "Playwright2 exit code: ${{ steps.playwright-run.outputs.exit_code }}"
-          echo "passed=$([ '${{ steps.playwright-run.outputs.exit_code }}' = '0' ] && echo true || echo false)" >> $GITHUB_OUTPUT
-
-      - name: Upload Playwright Report as Artifact
-        uses: actions/upload-artifact@v4
-        if: ${{ !cancelled() }}
+      - name: Run Playwright tests and determine result
+        id: playwright-check
+        uses: gjgcomp/actions-demo/.github/actions/playwright-status-check@master
         with:
-          name: playwright-report
-          path: automated-testing/playwright-report/
-          retention-days: 7
-
+          playwright_args: "${{ steps.get_args.outputs.test_args }}"
       - name: Parse JSON for counts
         id: parse-counts
         working-directory: automated-testing
@@ -118,7 +108,7 @@ jobs:
       - name: Zip Playwright report
         run: zip -r playwright-report.zip playwright-report/
         working-directory: automated-testing
-      
+
       - name: Determine Slack Webhook
         id: get-webhook
         env:
@@ -163,3 +153,36 @@ jobs:
           payload="{\"attachments\":[{\"color\":\"$status_color\",\"text\":\"*Critical Tests: $test_args*\\n• *Results:* $passed_count passed, $failed_count failed, $skipped_count skipped [$branch_name on $app_env]\\n• *Report:* <https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Full Report>\"}]}"
       
           curl -X POST -H 'Content-type: application/json' --data "$payload" $SLACK_WEBHOOK_URL
+
+      - name: Report results to ClickUp
+        uses: gjgcomp/actions-demo/.github/actions/clickup-report@master
+        with:
+          clickup_token: ${{ secrets.CLICKUP_API_TOKEN }}
+          clickup_task_id: ${{ steps.get_id.outputs.clickup_id }}
+          test_passed: ${{ steps.playwright-check.outputs.passed }}
+          attachment: automated-testing/playwright-report.zip
+      
+      - name: Trigger Concourse Rollback (via GitHub Release)
+        if: ${{ steps.playwright-check.outputs.passed != 'true' }} 
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl --silent -X POST "https://api.github.com/repos/${{ github.repository }}/releases" \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d '{"tag_name":"rollback-trigger-'$(date +%s)'","name":"Rollback Trigger"}'
+      
+      - name: Cleanup Release
+        if: ${{ steps.playwright-check.outputs.passed != 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_TAG="rollback-trigger-'$(date +%s)'"
+          RELEASE_ID=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/tags/$RELEASE_TAG" \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" | jq '.id')
+          
+          # Delete the release
+          curl -X DELETE "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID" \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json

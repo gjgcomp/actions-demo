@@ -1,6 +1,5 @@
 name: RSpec Status Check
 description: Run RSpec tests, set pass/fail boolean, and upload results.
-
 inputs:
   rspec_args:
     description: Arguments to pass to RSpec
@@ -9,24 +8,31 @@ inputs:
 
 outputs:
   passed:
-    description: Boolean indicating if the tests passed (true or false)
+    description: Boolean indicating if the tests passed (true) or failed (false)
     value: ${{ steps.set-result.outputs.passed }}
 
 runs:
   using: "composite"
   steps:
-    - name: Run RSpec and capture exit code
+    - name: Run RSpec and check status
       id: rspec-run
       shell: bash
+      continue-on-error: true
+      env:
+        RSPEC_ARGS: ${{ inputs.rspec_args }}
       run: |
-        set -o pipefail
-        bundle exec rspec ${{ inputs.rspec_args }} | tee rspec_output.txt
-        echo "exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+        set +e # We want to capture the exit code even if the command fails. Github Actions has this enabled by default. Keep it.
+        set -o pipefail # Makes sure that if any command in a pipeline fails, the whole pipeline fails.
+        bundle exec rspec $RSPEC_ARGS | tee rspec_output.txt
+        exit_code=$? # Capture the exit code of the last command. 0 is success, anything else is failure.
+        echo "Rspec exit code: $exit_code"
+        echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
 
     - name: Set result output
       id: set-result
       shell: bash
       run: |
+        echo "RSpec2 exit code: ${{ steps.rspec-run.outputs.exit_code }}"
         echo "passed=$([ '${{ steps.rspec-run.outputs.exit_code }}' = '0' ] && echo true || echo false)" >> $GITHUB_OUTPUT
 
     - name: Upload RSpec output

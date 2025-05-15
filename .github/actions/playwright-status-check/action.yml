@@ -1,0 +1,46 @@
+name: Playwright Status Check
+description: Run Playwright tests, set pass/fail boolean, and upload results.
+inputs:
+  playwright_args:
+    description: Arguments to pass to Playwright
+    required: false
+    default: ""
+
+outputs:
+  passed:
+    description: Boolean indicating if the tests passed (true) or failed (false)
+    value: ${{ steps.set-result.outputs.passed }}
+
+runs:
+  using: "composite"
+  steps:    
+    - name: Run Playwright tests
+      id: playwright-run
+      shell: bash
+      working-directory: automated-testing
+      continue-on-error: true
+      env:
+        PLAYWRIGHT_ARGS: ${{ inputs.playwright_args }}
+      run: |
+        set +e # We want to capture the exit code even if the command fails. Github Actions has this enabled by default. Keep it.
+        set -o pipefail # Makes sure that if any command in a pipeline fails, the whole pipeline fails.
+        npx playwright test $PLAYWRIGHT_ARGS
+        exit_code=$? # Capture the exit code of the last command. 0 is success, anything else is failure.
+        echo "Playwright exit code: $exit_code"
+        echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+        
+    - name: Set result output
+      id: set-result
+      shell: bash
+      run: |
+        echo "Playwright2 exit code: ${{ steps.playwright-run.outputs.exit_code }}"
+        echo "passed=$([ '${{ steps.playwright-run.outputs.exit_code }}' = '0' ] && echo true || echo false)" >> $GITHUB_OUTPUT
+
+      #This is needed so that it can be used later on in the workflow
+    - name: Upload Playwright Report as Artifact
+      uses: actions/upload-artifact@v4
+      if: ${{ !cancelled() }}
+      with:
+        name: playwright-report
+        path: automated-testing/playwright-report/
+        retention-days: 30

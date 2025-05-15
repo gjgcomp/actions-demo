@@ -1,0 +1,80 @@
+name: Ensure PR has ClickUp Task ID
+on:
+  workflow_call:
+    inputs: {}
+    secrets: {}
+
+jobs:
+  check-exemption:
+    uses: gjgcomp/actions-demo/.github/workflows/pr-exemption-status.yml@master
+  
+  ensure-task-id:
+    runs-on: ubuntu-latest
+    needs: check-exemption
+    if: ${{ needs.check-exemption.outputs.is_exempt == 'false' }}
+    steps:
+      - name: Extract Task ID from Different Sources
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_URL=$(jq -r '.pull_request.url' "$GITHUB_EVENT_PATH")
+          PR_TITLE=$(jq -r '.pull_request.title' "$GITHUB_EVENT_PATH")
+          PR_BODY=$(jq -r '.pull_request.body' "$GITHUB_EVENT_PATH")
+          BRANCH_NAME=$(jq -r '.pull_request.head.ref' "$GITHUB_EVENT_PATH")
+          ISSUE_URL="${PR_URL//pulls/issues}"
+
+          # Fetch all comments on the PR
+          COMMENTS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "$ISSUE_URL/comments")
+          
+          # 1 Extract ClickUp I D from PR comments (ClickUp auto-link)
+          TASK_ID=$(echo "$COMMENTS" | jq -r '.[].body' | grep -oP 'app.clickup.com/t/\K[A-Za-z0-9]+' | head -n 1)
+
+          # 2 If no ID from comments, check PR title
+          if [[ -z "$TASK_ID" ]]; then
+            TASK_ID=$(echo "$PR_TITLE" | grep -oP 'CU-[A-Za-z0-9]+' || true)
+          fi
+
+          # 3 If still no ID, check branch name
+          if [[ -z "$TASK_ID" ]]; then
+            TASK_ID=$(echo "$BRANCH_NAME" | grep -oP 'CU-[A-Za-z0-9]+' || true)
+          fi
+
+          # 4 If still no ID, fallback to PR body
+          if [[ -z "$TASK_ID" ]]; then
+            TASK_ID=$(echo "$PR_BODY" | sed -n 's/.*Task ID:[[:space:]]*\([A-Za-z0-9_-]\{8,12\}\).*/\1/p')
+          fi
+
+          # Fetch existing error comment
+          ERROR_COMMENT_ID=$(echo "$COMMENTS" | jq -r '.[] | select(.body | contains("🚨 **Task ID is missing!**")) | .id')
+          ERROR_COMMENT_URL="https://api.github.com/repos/${{ github.repository }}/issues/comments/${ERROR_COMMENT_ID}"
+
+          # Handle missing Task ID
+          if [[ -z "$TASK_ID" ]] || [[ "$TASK_ID" == "<!--" ]]; then
+            echo "❌ No Task ID found! Updating the comment..."
+
+            if [[ -z "$ERROR_COMMENT_ID" ]]; then
+              # No existing comment, so create one
+              COMMENT_BODY=$(jq -n --arg body "🚨 **Task ID is missing!** Please add your task ID in the PR title, branch name, or description using \Task ID: CU-XXXXX\" '{body: $body}')
+
+              curl -X POST -H "Authorization: token $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                -d "$COMMENT_BODY" \
+                "$ISSUE_URL/comments"
+            else
+              echo "Comment already exists, so no need to create another."
+            fi
+
+            exit 1
+          else
+            echo "✅ Task ID found: $TASK_ID"
+
+            if [[ -n "$ERROR_COMMENT_ID" ]]; then
+              # Task ID is now present, so delete the warning comment
+              echo "Deleting the warning comment..."
+              curl -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                "$ERROR_COMMENT_URL"
+            fi
+          fi

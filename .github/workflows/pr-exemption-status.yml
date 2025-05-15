@@ -1,0 +1,53 @@
+#Check if PR is exempt from ClickUp Task requirement
+name: Check PR Exemption Status
+on:
+  workflow_call:
+    outputs:
+      is_exempt:
+        description: "Indicates if PR is exempt from ClickUp ID check"
+        value: ${{ jobs.check-exemption.outputs.is_exempt }}
+
+jobs:
+  check-exemption:
+    runs-on: ubuntu-latest
+    outputs:
+      is_exempt: ${{ steps.set-exempt.outputs.result }}
+    steps:
+      - name: Fetch Labels?
+        id: fetch-labels
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LABELS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels" | jq -r '.[].name' | tr '\n' ',')
+
+          echo "Labels found: $LABELS"
+          echo "labels=$LABELS" >> $GITHUB_OUTPUT
+      - name: Check for Exemption
+        id: set-exempt
+        run: |
+          EXEMPT_LABEL="No ClickUp Task Needed"
+          EXEMPT_TITLE_REGEX="(Infrastructure|CI/CD|Bus)"
+          
+          # Check labels
+          IFS=',' read -r -a LABEL_ARRAY <<< "${{ steps.fetch-labels.outputs.labels }}" 
+          for label in "${LABEL_ARRAY[@]}"; do
+            if [[ "$label" == "$EXEMPT_LABEL" ]]; then
+              echo "🛑 PR is exempt due to label: $label"
+              echo "result=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          done
+
+          # Check title
+          PR_TITLE=$(jq -r '.pull_request.title' "$GITHUB_EVENT_PATH")
+          if [[ "$PR_TITLE" =~ $EXEMPT_TITLE_REGEX ]]; then
+            echo "🛑 PR is exempt due to title: $PR_TITLE"
+            echo "result=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # If no exemptions found
+          echo "✅ PR is NOT exempt."
+          echo "result=false" >> $GITHUB_OUTPUT

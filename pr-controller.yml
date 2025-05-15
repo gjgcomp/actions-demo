@@ -1,0 +1,25 @@
+name: "PR Controller"
+on:
+  pull_request:
+    types: [opened, labeled, unlabeled, edited, synchronize, closed]
+
+jobs:
+  check-exemption:
+    uses: gjgcomp/actions-demo/.github/workflows/pr-exemption-status.yml@master
+
+  validate-pr:
+    needs: check-exemption
+    uses: gjgcomp/actions-demo/.github/workflows/validate-tag-pr.yml@master
+    with:
+      is_exempt: ${{ needs.check-exemption.outputs.is_exempt }}
+    secrets:
+      HES_CI_CD_PRIVATE_KEY: ${{ secrets.HES_CI_CD_PRIVATE_KEY }}
+      HES_CI_CD_CLIENT_ID: ${{ secrets.HES_CI_CD_CLIENT_ID }}
+      HES_CI_CD_INSTALLATION_ID: ${{ secrets.HES_CI_CD_INSTALLATION_ID }}
+
+  clickup-checks:
+    needs: check-exemption
+    if: github.event.action == 'opened' || github.event.action == 'edited' || github.event.action == 'synchronize'
+    uses: gjgcomp/actions-demo/.github/workflows/ensure-clickup-id.yml@master
+    with:
+      is_exempt: ${{ needs.check-exemption.outputs.is_exempt }}

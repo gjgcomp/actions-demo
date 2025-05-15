@@ -26,7 +26,7 @@ jobs:
         ports:
           - 3306:3306
         env:
-          MYSQL_DATABASE: walktober_2025_test
+          MYSQL_DATABASE: myapp_test
           MYSQL_USER: ci-runner
           MYSQL_PASSWORD: password
           MYSQL_ROOT_PASSWORD: root
@@ -49,10 +49,10 @@ jobs:
     env:
       RAILS_ENV: test
       RACK_ENV: test
-      DATABASE_URL: mysql2://ci-runner:password@127.0.0.1:3306/walktober_2025_test
-      TARGET_DATABASE: walktober
-      APPLICATION_CONFIG_FILE: walktober.yml
-      PROJECT: walktober
+      DATABASE_URL: mysql2://ci-runner:password@127.0.0.1:3306/myapp_test
+      TARGET_DATABASE: myapp
+      APPLICATION_CONFIG_FILE: myapp.yml
+      PROJECT: myapp
       REDIS_ENDPOINT: redis://127.0.0.1:6379
       REDIS_URL: redis://127.0.0.1:6379
       MEMCACHED_ENDPOINT: memcached://memcached:11211
@@ -87,14 +87,14 @@ jobs:
       - name: Set up DB and run migrations
         run: |
           # Should a ci specific database.yml be used, or just use default?
-          cp config/database.walktober.yml config/database.yml
+          cp config/database.myapp.yml config/database.yml
           sed -i 's/prime-db/127.0.0.1/' config/database.yml
           sed -i 's/username: root/username: ci-runner/' config/database.yml
           bundle exec rake db:create db:schema:load
 
       - name: Run RSpec and determine result
         id: rspec-check
-        uses: hesdevs/actions/.github/actions/rspec-status-check@master
+        uses: gjgcomp/actions-demo/.github/actions/rspec-status-check@master
         with:
           rspec_args: "${{github.event.inputs.test_args}} --format documentation"
       
@@ -110,7 +110,7 @@ jobs:
         run: cat rspec_output.txt
 
       - name: Report results to ClickUp
-        uses: hesdevs/actions/.github/actions/clickup-report@master
+        uses: gjgcomp/actions-demo/.github/actions/clickup-report@master
         with:
           clickup_token: ${{ secrets.CLICKUP_API_TOKEN }}
           clickup_task_id: ${{ steps.get_id.outputs.clickup_id }}
